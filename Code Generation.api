@@ -5,12 +5,1718 @@ CREATE OR REPLACE PACKAGE CHANGE8_CODE_GEN_API AS
   FUNCTION generate_clu_projection_code(clu_name_ IN VARCHAR2) RETURN CLOB;
   FUNCTION generate_clu_client_code(clu_name_ IN VARCHAR2) RETURN CLOB;
   FUNCTION generate_enum_code(lu_reference_ IN VARCHAR2) RETURN CLOB;
-  
+
   FUNCTION generate_cf_entity_code(lu_name_ IN VARCHAR2) RETURN CLOB;
   FUNCTION generate_cf_projection_code(lu_name_ IN VARCHAR2) RETURN CLOB;
+
+  FUNCTION generate_clu_cdb(module_name_ IN VARCHAR2) RETURN CLOB;
+  FUNCTION generate_cf_cdb(module_name_ IN VARCHAR2) RETURN CLOB;
+
+  FUNCTION generate_cf_migration_scripts(lu_name_ IN VARCHAR2) RETURN CLOB;
+  FUNCTION generate_clu_migration_scripts(module_name_ IN VARCHAR2)
+    RETURN CLOB;
+END CHANGE8_CODE_GEN_API;
+/
+CREATE OR REPLACE PACKAGE BODY CHANGE8_CODE_GEN_API AS
+  FUNCTION to_pascal_case(column_name_ IN VARCHAR2) RETURN VARCHAR2 IS
+    new_col_name_ VARCHAR2(200);
+  BEGIN
+    new_col_name_ := REPLACE(column_name_, '_', ' ');
+    new_col_name_ := INITCAP(new_col_name_);
+    new_col_name_ := REPLACE(new_col_name_, ' ', '');
+    RETURN new_col_name_;
+  END to_pascal_case;
+
+  FUNCTION generate_clu_entity_code(clu_name_ IN VARCHAR2) RETURN CLOB IS
+    clob_    CLOB := '';
+    name_    VARCHAR2(100) := 'C' || clu_name_;
+    has_key_ BOOLEAN := FALSE;
+    lu_type_ VARCHAR2(20);
+    CURSOR column_cursor IS
+      SELECT t.attribute_name,
+             t.alternate_key_db,
+             t.data_type_db,
+             t.mandatory_db,
+             t.updateable_db,
+             t.data_length,
+             t.queryable_db,
+             t.custom_field_type_db,
+             t.ui_object_db,
+             t.format_db,
+             t.private_db,
+             t.metadata,
+             t.custom_field_impl_type_db,
+             t.lu_reference,
+             t.lov_db,
+             t.prompt,
+             t.insertable_db
+        FROM CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.lu = clu_name_ AND t.lu_type = 'CUSTOM_LU' AND
+             t.published_db = 'TRUE';
   
-  FUNCTION generate_clu_cdb(clu_name_ IN VARCHAR2) RETURN CLOB;
-  FUNCTION generate_cf_cdb(lu_name_ IN VARCHAR2) RETURN CLOB;
+    CURSOR lu_cursor IS
+      SELECT DISTINCT lu_type
+        FROM CUSTOM_FIELD_ATTRIBUTES
+       WHERE lu = clu_name_;
   
+  BEGIN
+    OPEN lu_cursor;
+    FETCH lu_cursor
+      INTO lu_type_;
+  
+    -- Validate LU type
+    IF lu_cursor%NOTFOUND THEN
+      ERROR_SYS.Record_General('NOTFOUND',
+                               'No LU or attributes found for ' ||
+                               clu_name_ || '.');
+    ELSIF lu_type_ != 'CUSTOM_LU' THEN
+      ERROR_SYS.Record_General('INCORRECTLUTYPE',
+                               'LU type must be a CLU.' || clu_name_ ||
+                               ' is a CF.');
+    END IF;
+    CLOSE lu_cursor;
+    DBMS_LOB.createtemporary(clob_, TRUE);
+    --generating XML header
+    DBMS_LOB.WRITEAPPEND(clob_,
+                         LENGTH('<?xml version="1.0" encoding="UTF-8"?>'),
+                         '<?xml version="1.0" encoding="UTF-8"?>');
+    Xml_Text_Writer_API.Init_Write_Buffer;
+    Xml_Record_Writer_SYS.Start_Element(clob_,
+                                        'ENTITY',
+                                        'xmlns:xsi',
+                                        'http://www.w3.org/2001/XMLSchema',
+                                        'xmlns',
+                                        'urn:ifsworld-com:schemas:entity_entity');
+    Xml_Record_Writer_SYS.Add_Element(clob_, 'NAME', name_);
+    Xml_Record_Writer_SYS.Add_Element(clob_, 'COMPONENT', 'CMOD');
+    Xml_Record_Writer_SYS.Add_Element(clob_, 'LAYER', 'Cust');
+    ---comment section
+    Xml_Record_Writer_SYS.Start_Element(clob_, 'COMMENTS');
+    FOR rec IN column_cursor LOOP
+      IF rec.custom_field_type_db = 'READ_ONLY_FIELD' AND
+         rec.custom_field_impl_type_db = 'SELECT_STATEMENT' THEN
+        Xml_Record_Writer_SYS.Start_Element(clob_, 'COMMENT');
+        Xml_Record_Writer_SYS.Add_Element(clob_, 'POSITION', '0');
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'COMMENT_TEXT',
+                                          '/*
+-------------------------------------------------------------------------
+Attribute Name: ' ||
+                                           rec.attribute_name || '
+Expression    : ' || rec.metadata || '
+-------------------------------------------------------------------------*/' ||
+                                           CHR(10));
+        Xml_Record_Writer_SYS.Add_Element(clob_, 'SECTION', 'top');
+        Xml_Record_Writer_SYS.End_Element(clob_, 'COMMENT');
+      END IF;
+    END LOOP;
+    Xml_Record_Writer_SYS.End_Element(clob_, 'COMMENTS');
+    Xml_Record_Writer_SYS.Start_Element(clob_, 'ATTRIBUTES');
+    --generating XML body
+    FOR rec IN column_cursor LOOP
+      --checking key exist or not
+      IF rec.alternate_key_db = 'TRUE' THEN
+        has_key_ := TRUE;
+      END IF;
+      IF rec.custom_field_type_db = 'PERSISTENT_FIELD' OR
+         rec.custom_field_impl_type_db != 'SELECT_STATEMENT' THEN
+        Xml_Record_Writer_SYS.Start_Element(clob_, 'ATTRIBUTE');
+        --if read only field
+      
+        rec.metadata := REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(UPPER(rec.metadata), -- Force the input string to uppercase
+                                                                     'IFSAPP\.', -- Remove all occurrences of 'IFSAPP.'
+                                                                     '',
+                                                                     1, -- Starting position
+                                                                     0, -- Replace all occurrences
+                                                                     'i' -- Case-insensitive matching
+                                                                     ),
+                                                      'CF\$_', -- Remove all occurrences of 'CF$_'
+                                                      '',
+                                                      1,
+                                                      0,
+                                                      'i' -- Case-insensitive matching
+                                                      ),
+                                       'CFP', -- Replace all occurrences of 'CFP' with 'API'
+                                       'API',
+                                       1,
+                                       0,
+                                       'i' -- Case-insensitive matching
+                                       );
+        Xml_Record_Writer_SYS.Start_Element(clob_,
+                                            'CODE_GENERATION_PROPERTIES');
+        Xml_Record_Writer_SYS.Start_Element(clob_,
+                                            'CODE_GENERATION_PROPERTIES');
+        IF rec.custom_field_type_db = 'READ_ONLY_FIELD' THEN
+          IF rec.custom_field_impl_type_db = 'EXPRESSION' THEN
+            Xml_Record_Writer_SYS.Add_Element(clob_,
+                                              'DB_SQL_IMPLEMENTATION',
+                                              rec.metadata);
+            -- ELSE
+            -- Xml_Record_Writer_SYS.Add_Element(clob_,
+            --          'DB_SQL_IMPLEMENTATION',
+            --           'C_TO_DO_SELECTS_API.Gen_Code');
+          END IF;
+        END IF;
+        Xml_Record_Writer_SYS.Add_Element(clob_, 'LABEL_TEXT', rec.prompt);
+        Xml_Record_Writer_SYS.End_Element(clob_,
+                                          'CODE_GENERATION_PROPERTIES');
+        Xml_Record_Writer_SYS.End_Element(clob_,
+                                          'CODE_GENERATION_PROPERTIES');
+      
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'NAME',
+                                          CHANGE8_CODE_GEN_API.to_pascal_case(rec.attribute_name));
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_PRIMARY_KEY',
+                                          CASE WHEN
+                                          rec.alternate_key_db = 'TRUE' THEN '1' ELSE '0' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_, 'IS_PARENT_KEY', '0');
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_PUBLIC',
+                                          CASE WHEN
+                                          rec.private_db = 'FALSE' THEN '1' ELSE '0' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_MANDATORY',
+                                          CASE WHEN
+                                          rec.alternate_key_db = 'TRUE' THEN '1' WHEN
+                                          rec.mandatory_db = 'TRUE' THEN '1' ELSE '0' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_SERVER_GENERATED',
+                                          CASE WHEN
+                                          rec.insertable_db = 'TRUE' THEN '0' ELSE '1' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_UPDATE_ALLOWED',
+                                          CASE WHEN
+                                          rec.alternate_key_db = 'TRUE' THEN '0' -- Keys are not editable
+                                          WHEN rec.updateable_db = 'TRUE' THEN '1' -- Updateable if not a key
+                                          ELSE '0' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_UPDATE_ALLOWED_IF_NULL',
+                                          '0');
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_DEFAULT_LOV',
+                                          CASE WHEN rec.lov_db = 'TRUE' THEN '1' ELSE '0' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_QUERYABLE',
+                                          CASE WHEN
+                                          rec.queryable_db = 'TRUE' THEN '1' ELSE '0' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_DERIVED',
+                                          CASE WHEN rec.custom_field_type_db =
+                                          'READ_ONLY_FIELD' THEN '1' ELSE '0' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'DATATYPE',
+                                          CASE WHEN
+                                          rec.data_type_db = 'STRING' THEN
+                                          'TEXT' WHEN
+                                          rec.data_type_db = 'REFERENCE' THEN
+                                          'TEXT' ELSE rec.data_type_db END);
+        IF rec.data_type_db IN ('REFERENCE', 'STRING') THEN
+          Xml_Record_Writer_SYS.Add_Element(clob_,
+                                            'LENGTH',
+                                            rec.data_length);
+        END IF;
+        IF (rec.data_type_db = 'ENUMERATION') THEN
+          IF (rec.ui_object_db IN ('CHECKBOX', 'CHECKBOX_REVERSED')) THEN
+            Xml_Record_Writer_SYS.Add_Element(clob_,
+                                              'ENUMERATION_NAME',
+                                              'FndBoolean');
+          ELSE
+            Xml_Record_Writer_SYS.Add_Element(clob_,
+                                              'ENUMERATION_NAME',
+                                              'C' || rec.lu_reference); -- prefix c for each lu_reference value
+          END IF;
+        END IF;
+        IF rec.format_db IN ('INVISIBLE', 'LOWERCASE', 'UPPERCASE') THEN
+          Xml_Record_Writer_SYS.Add_Element(clob_, 'FORMAT', rec.format_db);
+        END IF;
+      
+        Xml_Record_Writer_SYS.End_Element(clob_, 'ATTRIBUTE');
+      END IF;
+    END LOOP;
+    -----if a key is not defined, adding a field called recordid as a key
+    IF NOT has_key_ THEN
+      Xml_Record_Writer_SYS.Start_Element(clob_, 'ATTRIBUTE');
+      Xml_Record_Writer_SYS.Add_Element(clob_, 'NAME', 'RecordId');
+      Xml_Record_Writer_SYS.Add_Element(clob_, 'IS_PRIMARY_KEY', '1');
+      Xml_Record_Writer_SYS.Add_Element(clob_, 'IS_PARENT_KEY', '0');
+      Xml_Record_Writer_SYS.Add_Element(clob_, 'IS_PUBLIC', '1');
+      Xml_Record_Writer_SYS.Add_Element(clob_, 'IS_MANDATORY', 1);
+      Xml_Record_Writer_SYS.Add_Element(clob_, 'IS_SERVER_GENERATED', '0');
+      Xml_Record_Writer_SYS.Add_Element(clob_, 'IS_UPDATE_ALLOWED', '0');
+      Xml_Record_Writer_SYS.Add_Element(clob_,
+                                        'IS_UPDATE_ALLOWED_IF_NULL',
+                                        '0');
+      Xml_Record_Writer_SYS.Add_Element(clob_, 'IS_DEFAULT_LOV', '1');
+      Xml_Record_Writer_SYS.Add_Element(clob_, 'IS_QUERYABLE', '0');
+      Xml_Record_Writer_SYS.Add_Element(clob_, 'IS_DERIVED', '0');
+      Xml_Record_Writer_SYS.Add_Element(clob_, 'DATATYPE', 'NUMBER');
+    
+      Xml_Record_Writer_SYS.End_Element(clob_, 'ATTRIBUTE'); -- End ATTRIBUTE
+    END IF;
+    Xml_Record_Writer_SYS.End_Element(clob_, 'ATTRIBUTES');
+    FOR rec IN column_cursor LOOP
+    
+      ---- for reference fields
+      IF rec.data_type_db = 'REFERENCE' THEN
+        Xml_Record_Writer_SYS.Start_Element(clob_, 'ASSOCIATIONS');
+      
+        -- Start ASSOCIATION block
+        Xml_Record_Writer_SYS.Start_Element(clob_, 'ASSOCIATION');
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'NAME',
+                                          'C' || rec.lu_reference || 'Ref'); -- C+ lu_ref_name + 'Ref'
+        Xml_Record_Writer_SYS.Add_Element(clob_, 'IS_PARENT', '0');
+        Xml_Record_Writer_SYS.Add_Element(clob_, 'IS_VIEW_REFERENCE', '0');
+      
+        -- Add TO_ENTITY based on the reference
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'TO_ENTITY',
+                                          rec.lu_reference);
+      
+        -- Start ATTRIBUTES block for the association
+        Xml_Record_Writer_SYS.Start_Element(clob_, 'ATTRIBUTES');
+        Xml_Record_Writer_SYS.Start_Element(clob_, 'ASSOCIATION_ATTRIBUTE');
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'NAME',
+                                          CHANGE8_CODE_GEN_API.to_pascal_case(rec.attribute_name)); -- the original attribute name
+        Xml_Record_Writer_SYS.End_Element(clob_, 'ASSOCIATION_ATTRIBUTE');
+        Xml_Record_Writer_SYS.End_Element(clob_, 'ATTRIBUTES');
+      
+        -- End the ASSOCIATION block
+        Xml_Record_Writer_SYS.End_Element(clob_, 'ASSOCIATION');
+      
+        -- End the ASSOCIATIONS block
+        Xml_Record_Writer_SYS.End_Element(clob_, 'ASSOCIATIONS');
+      END IF;
+    END LOOP;
+    Xml_Record_Writer_SYS.End_Element(clob_, 'ENTITY');
+    Xml_Text_Writer_API.Write_End_Document(clob_);
+  
+    RETURN clob_;
+  
+  END generate_clu_entity_code;
+
+  FUNCTION generate_clu_projection_code(clu_name_ IN VARCHAR2) RETURN CLOB IS
+    code_              CLOB := '';
+    name_              VARCHAR2(100) := 'C' || clu_name_;
+    proj_              VARCHAR2(100) := name_ || 'Handling';
+    entityset_         VARCHAR2(100) := name_ || 'Set';
+    has_key_           BOOLEAN := FALSE;
+    lu_type_           VARCHAR2(20);
+    module_name_       VARCHAR2(50);
+    processed_modules_ VARCHAR2(32767) := '';
+    CURSOR column_cursor IS
+      SELECT t.attribute_name,
+             t.data_type,
+             t.data_type_db,
+             t.prompt,
+             t.ui_object_db,
+             t.lu_reference,
+             t.format_db,
+             t.custom_field_type_db,
+             t.custom_field_impl_type_db,
+             t.alternate_key_db,
+             t.metadata
+        FROM CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.lu = clu_name_ AND t.lu_type = 'CUSTOM_LU' AND
+             t.published_db = 'TRUE';
+  
+    CURSOR lu_cursor IS
+      SELECT DISTINCT lu_type
+        FROM CUSTOM_FIELD_ATTRIBUTES
+       WHERE lu = clu_name_;
+  
+    CURSOR module_cursor IS
+      SELECT DISTINCT s.MODULE, t.lu_reference
+        FROM custom_lus_dictionary s, CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.lu_reference = s.lu_name AND t.data_type_db = 'REFERENCE' AND
+             t.lu = clu_name_;
+  BEGIN
+    OPEN lu_cursor;
+    FETCH lu_cursor
+      INTO lu_type_;
+  
+    -- Validate LU type
+    IF lu_cursor%NOTFOUND THEN
+      ERROR_SYS.Record_General('NOTFOUND',
+                               'No LU or attributes found for ' ||
+                               clu_name_ || '.');
+    ELSIF lu_type_ != 'CUSTOM_LU' THEN
+      ERROR_SYS.Record_General('INCORRECTLUTYPE',
+                               'LU type must be a CLU.' || clu_name_ ||
+                               ' is a CF.');
+    END IF;
+    CLOSE lu_cursor;
+  
+    DBMS_LOB.createtemporary(code_, TRUE);
+    --generating Projection header
+    code_ := 'projection ' || proj_ || ';' || CHR(10) || 'component ' ||
+             'CMOD;' || CHR(10) || 'layer ' || 'Cust;' || CHR(10) ||
+             'description ' || '"Put some useful description here ...";' ||
+             CHR(10) || 'category ' || 'Users;' || CHR(10) || CHR(10);
+    code_ := code_ || 'entityset ' || entityset_ || ' for ' || name_ || ';' ||
+             CHR(10) || CHR(10);
+    code_ := code_ || '@Override' || CHR(10) || 'entity ' || name_ || ' {' ||
+             CHR(10);
+    -- Check if any attribute is defined as a key
+    FOR rec IN column_cursor LOOP
+      IF rec.alternate_key_db = 'TRUE' THEN
+        has_key_ := TRUE;
+      END IF;
+    END LOOP;
+  
+    -- Add RecordId as a key if no key is defined
+    IF NOT has_key_ THEN
+      code_ := code_ || '    attribute RecordId Number;' || CHR(10);
+    END IF;
+  
+    FOR rec IN column_cursor LOOP
+      --generating Projection body
+      code_ := code_ || '    attribute ' ||
+               CHANGE8_CODE_GEN_API.to_pascal_case(rec.attribute_name) || ' ' || CASE WHEN rec.data_type_db = 'STRING' THEN 'Text' WHEN rec.data_type_db = 'REFERENCE' THEN 'Text' WHEN rec.data_type_db = 'ENUMERATION' AND rec.ui_object_db IN ('CHECKBOX', 'CHECKBOX_REVERSED') THEN 'Boolean("TRUE", "FALSE")' WHEN rec.data_type_db = 'ENUMERATION' AND rec.ui_object_db IN ('COMBOBOX') THEN 'Enumeration(C' || rec.lu_reference || ')' ELSE INITCAP(rec.data_type_db) END || ' {' || CHR(10) || '      label = "' || rec.prompt || '" ;' || CHR(10);
+      IF rec.format_db IN ('CURRENCY', 'UPPERCASE', 'LOWERCASE') THEN
+        code_ := code_ || '      format = ' || CASE WHEN rec.format_db = 'CURRENCY' THEN 'ifscurrency' ELSE LOWER(rec.format_db) END || ';' || CHR(10) || '    }' || CHR(10);
+      ELSE
+        code_ := code_ || '      } ' || CHR(10);
+      END IF;
+    END LOOP;
+    ---for referene
+    FOR module_rec IN module_cursor LOOP
+      module_name_ := module_rec.MODULE;
+      IF NOT
+          INSTR(';' || processed_modules_ || ';', ';' || module_name_ || ';') > 0 THEN
+        -- Mark module as processed
+        processed_modules_ := processed_modules_ || ';' || module_name_;
+        DECLARE
+          dependency_generated_ BOOLEAN := FALSE;
+        BEGIN
+          FOR rec IN column_cursor LOOP
+            IF rec.data_type_db = 'REFERENCE' AND NOT dependency_generated_ THEN
+              -- Generate the DynamicComponentDependency statement
+              code_ := code_ || '    @DynamicComponentDependency ' ||
+                       module_name_ || CHR(10) || '    reference  ' || 'C' ||
+                       rec.lu_reference || 'Ref(' ||
+                       CHANGE8_CODE_GEN_API.to_pascal_case(rec.attribute_name) ||
+                       ')  ' || 'to  ' || rec.lu_reference || '(' ||
+                       CHANGE8_CODE_GEN_API.to_pascal_case(rec.metadata) || ');' ||
+                       CHR(10);
+            
+              -- Mark the dependency as generated for this module
+              dependency_generated_ := TRUE;
+            END IF;
+          END LOOP;
+        END;
+      
+        -- END LOOP;
+      END IF;
+    END LOOP;
+    code_ := code_ || '}' || CHR(10);
+    RETURN code_;
+  END generate_clu_projection_code;
+
+  FUNCTION generate_clu_client_code(clu_name_ IN VARCHAR2) RETURN CLOB IS
+    code2_                 CLOB := '';
+    name_                  VARCHAR2(100) := 'C' || clu_name_;
+    entityset_             VARCHAR2(100) := name_ || 'Set';
+    page_name_             VARCHAR2(100) := REGEXP_REPLACE(clu_name_,
+                                                           '([a-z])([A-Z])',
+                                                           '\1 \2');
+    list_name_             VARCHAR2(100) := 'C' || clu_name_ || 'List';
+    proj_                  VARCHAR2(100) := name_ || 'Handling';
+    has_key_               BOOLEAN := FALSE;
+    lu_type_               VARCHAR2(20);
+    module_name_           VARCHAR2(100);
+    processed_modules_     VARCHAR2(32767) := '';
+    processed_modules_lov_ VARCHAR2(32767) := '';
+    CURSOR column_cursor IS
+      SELECT t.attribute_name,
+             t.data_type,
+             t.data_type_db,
+             t.prompt,
+             t.ui_object_db,
+             t.custom_field_type_db,
+             t.custom_field_impl_type_db,
+             t.alternate_key_db,
+             t.lu_reference,
+             t.metadata
+        FROM CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.lu = clu_name_ AND t.lu_type = 'CUSTOM_LU' AND
+             t.published_db = 'TRUE';
+  
+    CURSOR lu_cursor IS
+      SELECT DISTINCT lu_type
+        FROM CUSTOM_FIELD_ATTRIBUTES
+       WHERE lu = clu_name_;
+  
+    CURSOR module_cursor IS
+      SELECT DISTINCT s.MODULE, t.lu_reference
+        FROM custom_lus_dictionary s, CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.lu_reference = s.lu_name AND t.data_type_db = 'REFERENCE' AND
+             t.lu = clu_name_;
+  
+  BEGIN
+    OPEN lu_cursor;
+    FETCH lu_cursor
+      INTO lu_type_;
+  
+    -- Validate LU type
+    IF lu_cursor%NOTFOUND THEN
+      ERROR_SYS.Record_General('NOTFOUND',
+                               'No LU or attributes found for ' ||
+                               clu_name_ || '.');
+    ELSIF lu_type_ != 'CUSTOM_LU' THEN
+      ERROR_SYS.Record_General('INCORRECTLUTYPE',
+                               'LU type must be a CLU.' || clu_name_ ||
+                               ' is a CF.');
+    END IF;
+    CLOSE lu_cursor;
+  
+    DBMS_LOB.createtemporary(code2_, TRUE);
+    --generating Client header
+    code2_ := 'client ' || name_ || ';' || CHR(10) || 'component ' ||
+              'CMOD;' || CHR(10) || 'layer ' || 'Cust;' || CHR(10) ||
+              'projection ' || proj_ || ';' || CHR(10) || 'description ' ||
+              '"Put some useful description here ...";' || CHR(10) ||
+              CHR(10);
+  
+    code2_ := code2_ || 'page List using ' || entityset_ || ' {' || CHR(10) ||
+              '  label = "' || page_name_ || '";' || CHR(10) || '  list ' ||
+              list_name_ || ';' || CHR(10) || '}' || CHR(10) || CHR(10);
+    ---- selectors-----------------------
+  
+    FOR module_rec IN module_cursor LOOP
+      module_name_ := module_rec.MODULE;
+      IF NOT
+          INSTR(';' || processed_modules_ || ';', ';' || module_name_ || ';') > 0 THEN
+        -- Mark module as processed
+        processed_modules_ := processed_modules_ || ';' || module_name_;
+        DECLARE
+          dependency_generated_ BOOLEAN := FALSE;
+        BEGIN
+          FOR rec IN column_cursor LOOP
+            IF rec.data_type_db = 'REFERENCE' AND NOT dependency_generated_ THEN
+              code2_                := code2_ ||
+                                       '@DynamicComponentDependency ' ||
+                                       module_name_ || CHR(10) ||
+                                       'selector C' || rec.lu_reference ||
+                                       'Selector for ' ||
+                                       module_rec.lu_reference || ' {' ||
+                                       CHR(10) || '   static ' ||
+                                       CHANGE8_CODE_GEN_API.to_pascal_case(rec.metadata) || ';' ||
+                                       CHR(10) || '   static Name;' ||
+                                       CHR(10) || '   static Description;' ||
+                                       CHR(10) || '}' || CHR(10) || CHR(10);
+              dependency_generated_ := TRUE;
+            END IF;
+          END LOOP;
+        END;
+      END IF;
+    END LOOP;
+    --generating Client body.
+    code2_ := code2_ || 'list ' || list_name_ || ' for ' || name_ || ' {' ||
+              CHR(10);
+    -- Check if any attribute is defined as a key
+    FOR rec IN column_cursor LOOP
+      IF rec.alternate_key_db = 'TRUE' THEN
+        has_key_ := TRUE;
+      END IF;
+    END LOOP;
+  
+    -- Add RecordId as a key if no key is defined
+    IF NOT has_key_ THEN
+      code2_ := code2_ || '   field RecordId ;' || CHR(10);
+    END IF;
+  
+    FOR rec IN column_cursor LOOP
+      IF rec.data_type_db != 'REFERENCE' THEN
+        code2_ := code2_ || '   field ' ||
+                  CHANGE8_CODE_GEN_API.to_pascal_case(rec.attribute_name);
+      
+        IF rec.data_type_db = 'ENUMERATION' AND
+           rec.ui_object_db IN ('CHECKBOX', 'CHECKBOX_REVERSED') THEN
+          code2_ := code2_ || ' {' || CHR(10) || '     required = [true];' ||
+                    CHR(10) || '   } ' || CHR(10);
+        ELSE
+          code2_ := code2_ || '; ' || CHR(10);
+        END IF;
+      END IF;
+    END LOOP;
+    FOR module_rec IN module_cursor LOOP
+      module_name_ := module_rec.MODULE;
+      IF NOT INSTR(';' || processed_modules_lov_ || ';',
+                   ';' || module_name_ || ';') > 0 THEN
+        -- Mark module as processed
+        processed_modules_lov_ := processed_modules_lov_ || ';' ||
+                                  module_name_;
+        DECLARE
+          dependency_generated_ BOOLEAN := FALSE;
+        BEGIN
+        
+          FOR rec IN column_cursor LOOP
+            IF rec.data_type_db = 'REFERENCE' AND NOT dependency_generated_ THEN
+              code2_                := code2_ ||
+                                       '   @DynamicComponentDependency ' ||
+                                       module_rec.MODULE || CHR(10) ||
+                                       '   lov ' || 'C' || rec.lu_reference ||
+                                       'Ref' || ' with  ' || 'C' ||
+                                       rec.lu_reference || 'Selector' || ';' ||
+                                       CHR(10);
+              dependency_generated_ := TRUE;
+            END IF;
+          END LOOP;
+        END;
+      
+      END IF;
+    END LOOP;
+    -- END LOOP; --
+    code2_ := code2_ || '}' || CHR(10) || CHR(10);
+    RETURN code2_;
+  END generate_clu_client_code;
+
+  FUNCTION generate_enum_code(lu_reference_ IN VARCHAR2) RETURN CLOB IS
+    clob_      CLOB := '';
+    name_      VARCHAR2(100) := 'C' || lu_reference_; -- Add "C" as a prefix
+    enum_name_ VARCHAR2(50);
+    lu_ref_    VARCHAR2(50);
+    CURSOR enum_cursor IS
+      SELECT db_value, client_value, seq_no
+        FROM CUSTOM_FIELD_ENUM_VALUES
+       WHERE lu_reference_ = lu
+       ORDER BY seq_no;
+  
+    CURSOR lu_ref_cursor IS
+      SELECT lu FROM CUSTOM_FIELD_ENUM_VALUES WHERE lu = lu_reference_;
+  
+  BEGIN
+    OPEN lu_ref_cursor;
+    FETCH lu_ref_cursor
+      INTO lu_ref_;
+  
+    -- Validate LU Reference
+    IF lu_ref_cursor%NOTFOUND THEN
+      ERROR_SYS.Record_General('NOTFOUND', 'Not found');
+    END IF;
+    CLOSE lu_ref_cursor;
+  
+    DBMS_LOB.createtemporary(clob_, TRUE);
+    DBMS_LOB.WRITEAPPEND(clob_,
+                         LENGTH('<?xml version="1.0" encoding="UTF-8"?>'),
+                         '<?xml version="1.0" encoding="UTF-8"?>');
+  
+    Xml_Record_Writer_SYS.Start_Element(clob_,
+                                        'ENUMERATION',
+                                        'xmlns:xsi',
+                                        'http://www.w3.org/2001/XMLSchema-instance',
+                                        'xmlns',
+                                        'urn:ifsworld-com:schemas:enumeration_enumeration');
+  
+    -- Add header information
+    Xml_Record_Writer_SYS.Add_Element(clob_, 'NAME', name_);
+    Xml_Record_Writer_SYS.Add_Element(clob_, 'COMPONENT', 'CMOD');
+    Xml_Record_Writer_SYS.Add_Element(clob_, 'LAYER', 'Cust');
+  
+    -- Start the VALUES section
+    Xml_Record_Writer_SYS.Start_Element(clob_, 'VALUES');
+  
+    -- Loop through the cursor to add each enumeration value
+    FOR rec IN enum_cursor LOOP
+      enum_name_ := 'DB' || TO_CHAR(rec.db_value);
+      Xml_Record_Writer_SYS.Start_Element(clob_, 'VALUE');
+    
+      Xml_Record_Writer_SYS.Start_Element(clob_,
+                                          'CODE_GENERATION_PROPERTIES');
+      Xml_Record_Writer_SYS.Start_Element(clob_,
+                                          'CODE_GENERATION_PROPERTIES');
+      Xml_Record_Writer_SYS.Add_Element(clob_, 'DB_VALUE', rec.db_value);
+      Xml_Record_Writer_SYS.Add_Element(clob_,
+                                        'CLIENT_VALUE',
+                                        rec.client_value);
+      Xml_Record_Writer_SYS.End_Element(clob_,
+                                        'CODE_GENERATION_PROPERTIES');
+      Xml_Record_Writer_SYS.End_Element(clob_,
+                                        'CODE_GENERATION_PROPERTIES');
+    
+      Xml_Record_Writer_SYS.Add_Element(clob_,
+                                        'NAME',
+                                        CASE WHEN REGEXP_LIKE(rec.db_value,
+                                                    '^[0-9]+$') THEN
+                                        enum_name_ ELSE
+                                        CHANGE8_CODE_GEN_API.to_pascal_case(rec.db_value) END);
+      Xml_Record_Writer_SYS.End_Element(clob_, 'VALUE');
+    END LOOP;
+  
+    Xml_Record_Writer_SYS.End_Element(clob_, 'VALUES');
+    Xml_Record_Writer_SYS.End_Element(clob_, 'ENUMERATION');
+    Xml_Text_Writer_API.Write_End_Document(clob_);
+  
+    Return clob_;
+  
+    DBMS_LOB.FREETEMPORARY(clob_);
+  END generate_enum_code;
+  -----------------------------for Custom Fields----------------------------
+  FUNCTION generate_cf_entity_code(lu_name_ IN VARCHAR2) RETURN CLOB IS
+    clob_           CLOB := '';
+    name_           VARCHAR2(100) := lu_name_;
+    component_name_ VARCHAR2(50); -- Declare the variable
+    lu_type_        VARCHAR2(20);
+    CURSOR column_cursor IS
+      SELECT t.attribute_name,
+             t.alternate_key_db,
+             t.data_type_db,
+             t.mandatory_db,
+             t.updateable_db,
+             t.data_length,
+             t.queryable_db,
+             t.custom_field_type_db,
+             t.ui_object_db,
+             t.format_db,
+             t.private_db,
+             t.metadata,
+             t.custom_field_impl_type_db,
+             t.lu_reference,
+             t.lov_db,
+             t.prompt,
+             t.insertable_db
+        FROM CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.lu = lu_name_ AND t.lu_type = 'CUSTOM_FIELD' ---CUSTOM_FIELD
+             AND t.published_db = 'TRUE';
+    CURSOR lu_cursor IS
+      SELECT DISTINCT lu_type
+        FROM CUSTOM_FIELD_ATTRIBUTES
+       WHERE lu = lu_name_;
+  
+  BEGIN
+    OPEN lu_cursor;
+    FETCH lu_cursor
+      INTO lu_type_;
+  
+    -- Validate LU type
+    IF lu_cursor%NOTFOUND THEN
+      ERROR_SYS.Record_General('NOTFOUND',
+                               'No LU or attributes found for ' || lu_name_ || '.');
+    ELSIF lu_type_ != 'CUSTOM_FIELD' THEN
+      ERROR_SYS.Record_General('INCORRECTLUTYPE',
+                               'LU type must be a CF. ' || lu_name_ ||
+                               ' is a CLU.');
+    END IF;
+    CLOSE lu_cursor;
+  
+    -- Fetch component name dynamically
+    SELECT module
+      INTO component_name_
+      FROM CUSTOM_FIELDS_DICTIONARY
+     WHERE lu_name = lu_name_;
+  
+    DBMS_LOB.createtemporary(clob_, TRUE);
+    --generating XML header
+    DBMS_LOB.WRITEAPPEND(clob_,
+                         LENGTH('<?xml version="1.0" encoding="UTF-8"?>'),
+                         '<?xml version="1.0" encoding="UTF-8"?>');
+    Xml_Text_Writer_API.Init_Write_Buffer;
+    Xml_Record_Writer_SYS.Start_Element(clob_,
+                                        'ENTITY',
+                                        'xmlns:xsi',
+                                        'http://www.w3.org/2001/XMLSchema',
+                                        'xmlns',
+                                        'urn:ifsworld-com:schemas:entity_entity');
+    Xml_Record_Writer_SYS.Add_Element(clob_, 'NAME', name_);
+    Xml_Record_Writer_SYS.Add_Element(clob_, 'COMPONENT', component_name_);
+    --Xml_Record_Writer_SYS.Add_Element(clob_, 'COMPONENT', 'CMOD'); --- this should be change
+    Xml_Record_Writer_SYS.Add_Element(clob_, 'LAYER', 'Cust');
+    ---comment section
+    Xml_Record_Writer_SYS.Start_Element(clob_, 'COMMENTS');
+    FOR rec IN column_cursor LOOP
+      IF rec.custom_field_type_db = 'READ_ONLY_FIELD' AND
+         rec.custom_field_impl_type_db = 'SELECT_STATEMENT' THEN
+        Xml_Record_Writer_SYS.Start_Element(clob_, 'COMMENT');
+        Xml_Record_Writer_SYS.Add_Element(clob_, 'POSITION', '0');
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'COMMENT_TEXT',
+                                          '/*
+-------------------------------------------------------------------------
+Attribute Name: ' ||
+                                           rec.attribute_name || '
+Expression    : ' || rec.metadata || '
+-------------------------------------------------------------------------*/' ||
+                                           CHR(10));
+        Xml_Record_Writer_SYS.Add_Element(clob_, 'SECTION', 'top');
+        Xml_Record_Writer_SYS.End_Element(clob_, 'COMMENT');
+      END IF;
+    END LOOP;
+    Xml_Record_Writer_SYS.End_Element(clob_, 'COMMENTS');
+    Xml_Record_Writer_SYS.Start_Element(clob_, 'ATTRIBUTES');
+    --generating XML body
+    FOR rec IN column_cursor LOOP
+      IF rec.custom_field_type_db = 'PERSISTENT_FIELD' OR
+         rec.custom_field_impl_type_db != 'SELECT_STATEMENT' THEN
+        Xml_Record_Writer_SYS.Start_Element(clob_, 'ATTRIBUTE');
+        --if read only field
+      
+        rec.metadata := REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(rec.metadata, -- No need to convert to UPPER
+                                                                     'IFSAPP\.', -- Remove all occurrences of 'IFSAPP.'
+                                                                     '',
+                                                                     1, -- Starting position
+                                                                     0 -- Replace all occurrences
+                                                                     ),
+                                                      'CF\$', -- Remove all occurrences of 'CF$'
+                                                      '',
+                                                      1,
+                                                      0),
+                                       'CFP', -- Replace all occurrences of 'CFP' with 'API'
+                                       'API',
+                                       1,
+                                       0);
+        Xml_Record_Writer_SYS.Start_Element(clob_,
+                                            'CODE_GENERATION_PROPERTIES');
+        Xml_Record_Writer_SYS.Start_Element(clob_,
+                                            'CODE_GENERATION_PROPERTIES');
+        IF rec.custom_field_type_db = 'READ_ONLY_FIELD' THEN
+          IF rec.custom_field_impl_type_db = 'EXPRESSION' THEN
+            Xml_Record_Writer_SYS.Add_Element(clob_,
+                                              'DB_SQL_IMPLEMENTATION',
+                                              rec.metadata);
+            -- ELSE
+            -- Xml_Record_Writer_SYS.Add_Element(clob_,
+            --          'DB_SQL_IMPLEMENTATION',
+            --           'C_TO_DO_SELECTS_API.Gen_Code');
+          END IF;
+        END IF;
+        Xml_Record_Writer_SYS.Add_Element(clob_, 'LABEL_TEXT', rec.prompt);
+        Xml_Record_Writer_SYS.End_Element(clob_,
+                                          'CODE_GENERATION_PROPERTIES');
+        Xml_Record_Writer_SYS.End_Element(clob_,
+                                          'CODE_GENERATION_PROPERTIES');
+      
+        /* Xml_Record_Writer_SYS.Add_Element(clob_,
+        'NAME',
+        CHANGE8_CODE_GEN_API.to_pascal_case(rec.attribute_name)); */
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'NAME',
+                                          'C' ||
+                                          CHANGE8_CODE_GEN_API.to_pascal_case(rec.attribute_name)); -- Explicitly prefix "C"
+      
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_PRIMARY_KEY',
+                                          CASE WHEN
+                                          rec.alternate_key_db = 'TRUE' THEN '1' ELSE '0' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_, 'IS_PARENT_KEY', '0');
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_PUBLIC',
+                                          CASE WHEN
+                                          rec.private_db = 'FALSE' THEN '1' ELSE '0' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_MANDATORY',
+                                          CASE WHEN
+                                          rec.alternate_key_db = 'TRUE' THEN '1' WHEN
+                                          rec.mandatory_db = 'TRUE' THEN '1' ELSE '0' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_SERVER_GENERATED',
+                                          CASE WHEN
+                                          rec.insertable_db = 'TRUE' THEN '0' ELSE '1' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_UPDATE_ALLOWED',
+                                          CASE WHEN
+                                          rec.alternate_key_db = 'TRUE' THEN '0' -- Keys are not editable
+                                          WHEN rec.updateable_db = 'TRUE' THEN '1' -- Updateable if not a key
+                                          ELSE '0' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_UPDATE_ALLOWED_IF_NULL',
+                                          '0');
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_DEFAULT_LOV',
+                                          CASE WHEN rec.lov_db = 'TRUE' THEN '1' ELSE '0' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_QUERYABLE',
+                                          CASE WHEN
+                                          rec.queryable_db = 'TRUE' THEN '1' ELSE '0' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'IS_DERIVED',
+                                          CASE WHEN rec.custom_field_type_db =
+                                          'READ_ONLY_FIELD' THEN '1' ELSE '0' END);
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'DATATYPE',
+                                          CASE WHEN
+                                          rec.data_type_db = 'STRING' THEN
+                                          'TEXT' WHEN
+                                          rec.data_type_db = 'REFERENCE' THEN
+                                          'TEXT' ELSE rec.data_type_db END);
+        IF rec.data_type_db IN ('REFERENCE', 'STRING') THEN
+          Xml_Record_Writer_SYS.Add_Element(clob_,
+                                            'LENGTH',
+                                            rec.data_length);
+        END IF;
+        IF (rec.data_type_db = 'ENUMERATION') THEN
+          IF (rec.ui_object_db IN ('CHECKBOX', 'CHECKBOX_REVERSED')) THEN
+            Xml_Record_Writer_SYS.Add_Element(clob_,
+                                              'ENUMERATION_NAME',
+                                              'FndBoolean');
+          ELSE
+            Xml_Record_Writer_SYS.Add_Element(clob_,
+                                              'ENUMERATION_NAME',
+                                              'C' || rec.lu_reference); -- prefix c for each lu_reference value
+          END IF;
+        END IF;
+        IF rec.format_db IN ('INVISIBLE', 'LOWERCASE', 'UPPERCASE') THEN
+          Xml_Record_Writer_SYS.Add_Element(clob_, 'FORMAT', rec.format_db);
+        END IF;
+      
+        Xml_Record_Writer_SYS.End_Element(clob_, 'ATTRIBUTE');
+      END IF;
+    END LOOP;
+    Xml_Record_Writer_SYS.End_Element(clob_, 'ATTRIBUTES');
+    FOR rec IN column_cursor LOOP
+      ---- for reference fields
+      IF rec.data_type_db = 'REFERENCE' THEN
+        Xml_Record_Writer_SYS.Start_Element(clob_, 'ASSOCIATIONS');
+      
+        -- Start ASSOCIATION block
+        Xml_Record_Writer_SYS.Start_Element(clob_, 'ASSOCIATION');
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'NAME',
+                                          'C' || rec.lu_reference || 'Ref'); -- C+ lu_ref_name + 'Ref'
+        Xml_Record_Writer_SYS.Add_Element(clob_, 'IS_PARENT', '0');
+        Xml_Record_Writer_SYS.Add_Element(clob_, 'IS_VIEW_REFERENCE', '0');
+      
+        -- Add TO_ENTITY based on the reference entity
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'TO_ENTITY',
+                                          rec.lu_reference);
+      
+        -- Start ATTRIBUTES block for the association
+        Xml_Record_Writer_SYS.Start_Element(clob_, 'ATTRIBUTES');
+        Xml_Record_Writer_SYS.Start_Element(clob_, 'ASSOCIATION_ATTRIBUTE');
+        Xml_Record_Writer_SYS.Add_Element(clob_,
+                                          'NAME',
+                                          'C' ||
+                                          CHANGE8_CODE_GEN_API.to_pascal_case(rec.attribute_name)); -- the original attribute name
+        Xml_Record_Writer_SYS.End_Element(clob_, 'ASSOCIATION_ATTRIBUTE');
+        Xml_Record_Writer_SYS.End_Element(clob_, 'ATTRIBUTES');
+      
+        -- End the ASSOCIATION block
+        Xml_Record_Writer_SYS.End_Element(clob_, 'ASSOCIATION');
+      
+        -- End the ASSOCIATIONS block
+        Xml_Record_Writer_SYS.End_Element(clob_, 'ASSOCIATIONS');
+      END IF;
+    END LOOP;
+    Xml_Record_Writer_SYS.End_Element(clob_, 'ENTITY');
+    Xml_Text_Writer_API.Write_End_Document(clob_);
+  
+    RETURN clob_;
+  
+  END generate_cf_entity_code;
+
+  FUNCTION generate_cf_projection_code(lu_name_ IN VARCHAR2) RETURN CLOB IS
+    code_              CLOB := '';
+    name_              VARCHAR2(100) := lu_name_;
+    proj_              VARCHAR2(100) := name_ || 'Handling';
+    entityset_         VARCHAR2(100) := name_ || 'Set';
+    module_name_       VARCHAR2(100);
+    lu_type_           VARCHAR2(20);
+    processed_modules_ VARCHAR2(32767) := '';
+    CURSOR column_cursor IS
+      SELECT t.attribute_name,
+             t.data_type,
+             t.data_type_db,
+             t.prompt,
+             t.ui_object_db,
+             t.lu_reference,
+             t.format_db,
+             t.custom_field_type_db,
+             t.custom_field_impl_type_db,
+             t.metadata
+        FROM CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.lu = lu_name_ AND t.lu_type = 'CUSTOM_FIELD' AND
+             t.published_db = 'TRUE';
+  
+    CURSOR module_cursor IS
+      SELECT d.MODULE
+        FROM CUSTOM_FIELDS_DICTIONARY d, CUSTOM_FIELD_ATTRIBUTES t
+       WHERE d.LU_NAME = t.LU AND lu_name_ = t.LU;
+  
+    CURSOR ref_cursor IS
+      SELECT DISTINCT s.MODULE, t.lu_reference
+        FROM custom_FIELDS_dictionary s, CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.lu_reference = s.lu_name AND t.data_type_db = 'REFERENCE' AND
+             t.lu = lu_name_;
+  
+    CURSOR lu_cursor IS
+      SELECT DISTINCT lu_type
+        FROM CUSTOM_FIELD_ATTRIBUTES
+       WHERE lu = lu_name_;
+  
+  BEGIN
+    OPEN lu_cursor;
+    FETCH lu_cursor
+      INTO lu_type_;
+  
+    -- Validate LU type
+    IF lu_cursor%NOTFOUND THEN
+      ERROR_SYS.Record_General('NOTFOUND',
+                               'No LU or attributes found for ' || lu_name_ || '.');
+    ELSIF lu_type_ != 'CUSTOM_FIELD' THEN
+      ERROR_SYS.Record_General('INCORRECTLUTYPE',
+                               'LU type must be a CF. ' || lu_name_ ||
+                               ' is a CLU.');
+    END IF;
+    CLOSE lu_cursor;
+  
+    DBMS_LOB.createtemporary(code_, TRUE);
+  
+    -- Fetch the module name
+    OPEN module_cursor;
+    FETCH module_cursor
+      INTO module_name_; -- Fetch the first row to get the module name
+    CLOSE module_cursor;
+  
+    --generating Projection header
+    code_ := 'projection ' || proj_ || ';' || CHR(10) || 'component ' ||
+             module_name_ || ';' || CHR(10) || 'layer ' || 'Cust;' ||
+             CHR(10) || 'description ' ||
+             '"Put some useful description here ...";' || CHR(10) ||
+             'category ' || 'Users;' || CHR(10) || CHR(10);
+    code_ := code_ || '@Override' || CHR(10) || 'entityset ' || entityset_ ||
+             ' for ' || name_ || ';' || CHR(10) || CHR(10);
+    code_ := code_ || '@Override' || CHR(10) || 'entity ' || name_ || ' {' ||
+             CHR(10);
+  
+    FOR rec IN column_cursor LOOP
+      --generating Projection body
+      code_ := code_ || '    attribute ' || 'C' ||
+               CHANGE8_CODE_GEN_API.to_pascal_case(rec.attribute_name) || ' ' || CASE WHEN rec.data_type_db = 'STRING' THEN 'Text' WHEN rec.data_type_db = 'REFERENCE' THEN 'Text' WHEN rec.data_type_db = 'ENUMERATION' AND rec.ui_object_db IN ('CHECKBOX', 'CHECKBOX_REVERSED') THEN 'Boolean("TRUE", "FALSE")' WHEN rec.data_type_db = 'ENUMERATION' AND rec.ui_object_db IN ('COMBOBOX') THEN 'Enumeration(C' || rec.lu_reference || ')' ELSE INITCAP(rec.data_type_db) END || ' {' || CHR(10) || '      label = "' || rec.prompt || '" ;' || CHR(10);
+      IF rec.format_db IN ('CURRENCY', 'UPPERCASE', 'LOWERCASE') THEN
+        code_ := code_ || '      format = ' || CASE WHEN rec.format_db = 'CURRENCY' THEN 'ifscurrency' ELSE LOWER(rec.format_db) END || ';' || CHR(10) || '    }' || CHR(10);
+      ELSE
+        code_ := code_ || '      } ' || CHR(10);
+      END IF;
+    END LOOP;
+  
+    FOR module_rec IN ref_cursor LOOP
+      module_name_ := module_rec.MODULE;
+      IF NOT
+          INSTR(';' || processed_modules_ || ';', ';' || module_name_ || ';') > 0 THEN
+        -- Mark module as processed
+        processed_modules_ := processed_modules_ || ';' || module_name_;
+        DECLARE
+          dependency_generated_ BOOLEAN := FALSE;
+        BEGIN
+          FOR rec IN column_cursor LOOP
+            ---for referene
+            IF rec.data_type_db = 'REFERENCE' THEN
+              code_                 := code_ ||
+                                       '    @DynamicComponentDependency ' ||
+                                       module_name_ || CHR(10) ||
+                                       '    reference  ' || 'C' ||
+                                       rec.lu_reference || 'Ref' || '(' || 'C' ||
+                                       CHANGE8_CODE_GEN_API.to_pascal_case(rec.attribute_name) ||
+                                       ')  ' || 'to  ' || rec.lu_reference || '(' ||
+                                       CHANGE8_CODE_GEN_API.to_pascal_case(rec.metadata) || ');' ||
+                                       CHR(10);
+              dependency_generated_ := TRUE;
+            END IF;
+          END LOOP;
+        END;
+      END IF;
+    END LOOP;
+    code_ := code_ || '}' || CHR(10);
+    RETURN code_;
+  END generate_cf_projection_code;
+
+  -----------------cdb---------------
+  FUNCTION generate_clu_cdb(module_name_ IN VARCHAR2) RETURN CLOB IS
+    clob_       CLOB;
+    base_table_ VARCHAR2(100);
+    file_name_  VARCHAR2(100);
+    key_        VARCHAR2(100);
+    has_key_    BOOLEAN := FALSE;
+    constraint_ VARCHAR2(100);
+    code_       CLOB;
+    seq_name_   VARCHAR2(100);
+    lu_type_    VARCHAR2(20);
+    CURSOR lu_cursor IS
+      SELECT DISTINCT s.BASE_TABLE, s.LU_NAME
+        FROM dictionary_sys_lu s, CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.lu_type = 'CUSTOM_LU' AND t.lu = s.lu_name AND
+             s.MODULE = module_name_;
+  
+    CURSOR column_cursor(clu_name_ IN VARCHAR2) IS
+      SELECT t.attribute_name,
+             t.data_type_db,
+             t.data_length,
+             t.mandatory_db,
+             t.custom_field_type_db,
+             t.alternate_key_db
+        FROM CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.lu = clu_name_ AND t.lu_type = 'CUSTOM_LU' AND
+             t.published_db = 'TRUE'
+       ORDER BY CASE
+                  WHEN t.alternate_key_db = 'TRUE' THEN
+                   0
+                  ELSE
+                   1
+                END,
+                t.attribute_name;
+    CURSOR validate_cursor IS
+      SELECT DISTINCT MODULE
+        FROM dictionary_sys_lu
+       WHERE MODULE = module_name_;
+  
+  BEGIN
+    OPEN validate_cursor;
+    FETCH validate_cursor
+      INTO lu_type_;
+  
+    -- Validate Module
+    IF validate_cursor%NOTFOUND THEN
+    
+      ERROR_SYS.Record_General('NOTFOUND',
+                               'No Module found for ' || module_name_ || '.');
+    END IF;
+    CLOSE validate_cursor;
+    -- Initialize the CLOB for storing the output
+    DBMS_LOB.createtemporary(clob_, TRUE);
+  
+    -- Generate header
+    code_      := '-----------------------------------------------------------------------------' ||
+                  CHR(10);
+    code_      := code_ || '--  Module : CMOD' || CHR(10);
+    code_      := code_ || '--' || CHR(10);
+    file_name_ := TO_CHAR(SYSDATE, 'YYMMDD') || '_CASEID_' || 'CMOD' ||
+                  '.cdb';
+    code_      := code_ || '--  File   : ' || file_name_ || CHR(10);
+    code_      := code_ || '--' || CHR(10);
+    code_      := code_ || '--  IFS Developer Studio Template Version 2.6' ||
+                  CHR(10);
+    code_      := code_ || '--' || CHR(10);
+    code_      := code_ || '--  Date     Sign    History' || CHR(10);
+    code_      := code_ ||
+                  '--  ------   ------  --------------------------------------------------' ||
+                  CHR(10);
+    code_      := code_ || '--  ' || TO_CHAR(SYSDATE, 'DDMMYY') || CHR(10);
+    code_      := code_ ||
+                  '--  ------   ------  --------------------------------------------------' ||
+                  CHR(10);
+    code_      := code_ ||
+                  '-----------------------------------------------------------------------------' ||
+                  CHR(10);
+    code_      := code_ || 'SET SERVEROUTPUT ON' || CHR(10);
+  
+    FOR lu_rec IN lu_cursor LOOP
+      has_key_    := FALSE;
+      base_table_ := lu_rec.BASE_TABLE;
+      base_table_ := 'C_' || REPLACE(base_table_, 'CLT', 'TAB');
+      key_        := REPLACE(base_table_, 'TAB', 'PK');
+      constraint_ := REPLACE(base_table_, 'TAB', 'RK');
+      seq_name_   := REPLACE(base_table_, 'TAB', 'SEQ');
+    
+      -- Generate table creation code
+    
+      code_ := code_ || 'PROMPT CREATING TABLE ' || base_table_ || '...' ||
+               CHR(10);
+      code_ := code_ || 'DECLARE' || CHR(10);
+      code_ := code_ || '   table_name_ VARCHAR2(30) := ''' || base_table_ ||
+               ''';' || CHR(10);
+      code_ := code_ || '   columns_    Database_SYS.ColumnTabType;' ||
+               CHR(10);
+      code_ := code_ || '   column_     Database_SYS.ColRec;' || CHR(10);
+      code_ := code_ || 'BEGIN' || CHR(10);
+      code_ := code_ || '   Database_SYS.Reset_Column_Table(columns_);' ||
+               CHR(10);
+      DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+    
+      FOR column_rec IN column_cursor(lu_rec.LU_NAME) LOOP
+        IF column_rec.alternate_key_db = 'TRUE' THEN
+          has_key_ := TRUE;
+        END IF;
+      
+      END LOOP;
+      IF NOT has_key_ THEN
+        code_ := '   Database_SYS.Set_Table_Column(columns_, ''RECORD_ID'', ''NUMBER'', ''N'');' ||
+                 CHR(10);
+        DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+      END IF;
+      FOR column_rec IN column_cursor(lu_rec.LU_NAME) LOOP
+      
+        IF column_rec.custom_field_type_db != 'READ_ONLY_FIELD' THEN
+          code_ := '   Database_SYS.Set_Table_Column(columns_, ''' ||
+                   column_rec.attribute_name || ''', ''' || CASE WHEN column_rec.data_type_db IN ('STRING', 'REFERENCE', 'ENUMERATION') THEN 'VARCHAR2' ELSE column_rec.data_type_db END || CASE WHEN column_rec.data_type_db IN ('STRING', 'VARCHAR2', 'REFERENCE', 'ENUMERATION') THEN '(' || column_rec.data_length || ')' ELSE '' END || ''', ''' || CASE WHEN column_rec.alternate_key_db = 'TRUE' THEN 'N' ELSE 'Y' END || ''');' || CHR(10);
+          DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+        END IF;
+      END LOOP;
+      -- Close the table creation block
+      code_ := '   Database_SYS.Set_Table_Column(columns_, ''ROWVERSION'', ''DATE'', ''N'');' ||
+               CHR(10);
+      code_ := code_ ||
+               '   Database_SYS.Set_Table_Column(columns_, ''ROWKEY'', ''VARCHAR2(50)'', ''N'', ''sys_guid()'');' ||
+               CHR(10);
+      DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+      code_ := '   Database_SYS.Create_Or_Replace_Table(table_name_, columns_, ''&' ||
+               'IFSAPP_DATA'', NULL, TRUE);' || CHR(10);
+      code_ := code_ || 'END;' || CHR(10);
+      code_ := code_ || '/ ' || CHR(10) || CHR(10);
+    
+      ----PK Table
+      code_ := code_ || 'PROMPT  CREATING ' || key_ || '  FOR  ' ||
+               base_table_ || '...' || CHR(10);
+      code_ := code_ || 'DECLARE' || CHR(10);
+      code_ := code_ || '   index_name_ VARCHAR2(30) := ''' || key_ ||
+               ''';' || CHR(10);
+      code_ := code_ || '   table_name_ VARCHAR2(30) := ''' || base_table_ ||
+               ''';' || CHR(10);
+      code_ := code_ || '   columns_     Database_SYS.ColumnTabType;' ||
+               CHR(10);
+      code_ := code_ || 'BEGIN' || CHR(10);
+      code_ := code_ || '   Database_SYS.Reset_Column_Table(columns_);' ||
+               CHR(10);
+      DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+    
+      -- Iterate over each column and generate column definitions
+    
+      FOR column_rec IN column_cursor(lu_rec.LU_NAME) LOOP
+      
+        IF column_rec.alternate_key_db = 'TRUE' THEN
+          has_key_ := TRUE;
+          code_    := '   Database_SYS.Set_Table_Column(columns_, ''' ||
+                      column_rec.attribute_name || ''');' || CHR(10);
+          DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+        END IF;
+      
+      END LOOP;
+      IF NOT has_key_ THEN
+        code_ := '   Database_SYS.Set_Table_Column(columns_, ''' ||
+                 'RECORD_ID' || ''');' || CHR(10);
+        DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+      END IF;
+      -- Close the table creation block
+      code_ := '   Database_SYS.Create_Constraint(table_name_, index_name_, columns_, ''P'', ''&' ||
+               'IFSAPP_INDEX'', NULL, TRUE, TRUE);' || CHR(10);
+      code_ := code_ || 'END;' || CHR(10);
+      code_ := code_ || '/ ' || CHR(10) || CHR(10);
+    
+      ---------------CONSTRAINTS--
+      code_ := code_ || 'PROMPT  CREATING ' || constraint_ || '  FOR  ' ||
+               base_table_ || '...' || CHR(10);
+      code_ := code_ || 'DECLARE' || CHR(10);
+      code_ := code_ || '   index_name_ VARCHAR2(30) := ''' || constraint_ ||
+               ''';' || CHR(10);
+      code_ := code_ || '   table_name_ VARCHAR2(30) := ''' || base_table_ ||
+               ''';' || CHR(10);
+      code_ := code_ || '   columns_     Database_SYS.ColumnTabType;' ||
+               CHR(10);
+      code_ := code_ || 'BEGIN' || CHR(10);
+      code_ := code_ || '   Database_SYS.Reset_Column_Table(columns_);' ||
+               CHR(10);
+      DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+    
+      -- Iterate over each column and generate column definitions
+    
+      code_ := '   Database_SYS.Set_Table_Column(columns_, ''' || 'ROWKEY' ||
+               ''');' || CHR(10);
+    
+      DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+      -- Close the table creation block
+      code_ := '   Database_SYS.Create_Constraint(table_name_, index_name_, columns_, ''U'', ''&' ||
+               'IFSAPP_INDEX'', NULL, TRUE, TRUE);' || CHR(10);
+      code_ := code_ || 'END;' || CHR(10);
+      code_ := code_ || '/ ' || CHR(10) || CHR(10);
+    
+      ---sequence---
+      FOR column_rec IN column_cursor(lu_rec.LU_NAME) LOOP
+        -- Check if alternate_key exists
+        IF column_rec.alternate_key_db = 'TRUE' THEN
+          has_key_ := TRUE;
+        END IF;
+      END LOOP;
+      IF NOT has_key_ THEN
+      
+        code_ := code_ || 'PROMPT  CREATING SEQUENCE ' || seq_name_ ||
+                 '...' || CHR(10);
+        code_ := code_ || 'DECLARE' || CHR(10);
+        code_ := code_ || '   sequence_name_ VARCHAR2(30) := ''' ||
+                 seq_name_ || ''';' || CHR(10);
+        code_ := code_ || 'BEGIN' || CHR(10);
+        code_ := code_ ||
+                 '   Database_SYS.Create_Sequence(sequence_name_, ''' ||
+                 'MAXVALUE 999999999999999 INCREMENT BY 1 START WITH 1 NOCACHE' ||
+                 ''' ,TRUE );' || CHR(10);
+      
+        code_ := code_ || 'END;' || CHR(10);
+        code_ := code_ || '/ ' || CHR(10) || CHR(10);
+      
+      END IF;
+    
+    END LOOP;
+    code_ := code_ || 'SET SERVEROUTPUT OFF' || CHR(10);
+    DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+    -- Return the generated CLOB
+    RETURN clob_;
+  
+    -- Free the temporary CLOB
+    DBMS_LOB.FREETEMPORARY(clob_);
+  END generate_clu_cdb;
+
+  FUNCTION generate_cf_cdb(module_name_ IN VARCHAR2) RETURN CLOB IS
+    clob_        CLOB;
+    base_table_  VARCHAR2(100);
+    file_name_   VARCHAR2(100);
+    code_        CLOB;
+    column_count INTEGER;
+    module_      VARCHAR2(100);
+  
+    CURSOR lu_cursor IS
+      SELECT DISTINCT s.BASE_TABLE, s.LU_NAME
+        FROM dictionary_sys_lu s, CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.lu_type = 'CUSTOM_FIELD' AND t.lu = s.lu_name AND
+             s.MODULE = module_name_;
+  
+    CURSOR column_cursor(lu_name_ IN VARCHAR2) IS
+      SELECT t.attribute_name,
+             t.data_type_db,
+             t.data_length,
+             t.mandatory_db,
+             t.custom_field_type_db
+        FROM CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.lu = lu_name_ AND t.lu_type = 'CUSTOM_FIELD' AND
+             t.published_db = 'TRUE' AND
+             custom_field_type_db = 'PERSISTENT_FIELD';
+  
+    -- Cursor to validate if the given LU is a valid Custom Field LU 
+    CURSOR validate_cursor IS
+      SELECT DISTINCT MODULE
+        FROM dictionary_sys_lu
+       WHERE MODULE = module_name_;
+  
+  BEGIN
+  
+    -- Validate the LU type
+    OPEN validate_cursor;
+    FETCH validate_cursor
+      INTO module_;
+    IF validate_cursor%NOTFOUND THEN
+      ERROR_SYS.Record_General('NOTFOUND',
+                               'No Module found for ' || module_name_ || '.');
+    
+    END IF;
+    CLOSE validate_cursor;
+  
+    -- Initialize the CLOB for storing the output
+    DBMS_LOB.createtemporary(clob_, TRUE);
+  
+    -- Generate header
+    code_      := '-----------------------------------------------------------------------------' ||
+                  CHR(10);
+    code_      := code_ || '--  Module : ' || module_name_ || CHR(10);
+    code_      := code_ || '--' || CHR(10);
+    file_name_ := TO_CHAR(SYSDATE, 'YYMMDD') || '_CASEID_' || module_name_ ||
+                  '.cdb';
+    code_      := code_ || '--  File   : ' || file_name_ || CHR(10);
+    code_      := code_ || '--' || CHR(10);
+    code_      := code_ || '--  IFS Developer Studio Template Version 2.6' ||
+                  CHR(10);
+    code_      := code_ || '--' || CHR(10);
+    code_      := code_ || '--  Date     Sign    History' || CHR(10);
+    code_      := code_ ||
+                  '--  ------   ------  --------------------------------------------------' ||
+                  CHR(10);
+    code_      := code_ || '--  ' || TO_CHAR(SYSDATE, 'DDMMYY') || CHR(10);
+    code_      := code_ ||
+                  '--  ------   ------  --------------------------------------------------' ||
+                  CHR(10);
+    code_      := code_ ||
+                  '-----------------------------------------------------------------------------' ||
+                  CHR(10);
+    -- Start script generation
+    code_ := code_ || 'SET SERVEROUTPUT ON' || CHR(10);
+    DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+  
+    -- Iterate over each LU_NAME in the module
+    FOR lu_rec IN lu_cursor LOOP
+      base_table_ := lu_rec.BASE_TABLE;
+    
+      -- Check if columns exist for the current LU_NAME
+      SELECT COUNT(*)
+        INTO column_count
+        FROM CUSTOM_FIELD_ATTRIBUTES
+       WHERE lu = lu_rec.LU_NAME AND lu_type = 'CUSTOM_FIELD' AND
+             custom_field_type_db != 'READ_ONLY_FIELD';
+    
+      -- Skip if no columns are defined
+      IF column_count = 0 THEN
+        CONTINUE;
+      END IF;
+    
+      -- Generate table creation code for the LU_NAME
+      code_ := 'DECLARE' || CHR(10) || '   table_name_ VARCHAR2(30) := ''' ||
+               base_table_ || ''';' || CHR(10) ||
+               '   columns_    Database_SYS.ColumnTabType;' || CHR(10) ||
+               '   column_     Database_SYS.ColRec;' || CHR(10) || 'BEGIN' ||
+               CHR(10);
+      DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+    
+      -- Generate columns for the current LU_NAME
+      FOR column_rec IN column_cursor(lu_rec.LU_NAME) LOOP
+        IF column_rec.custom_field_type_db != 'READ_ONLY_FIELD' THEN
+          code_ := '   Database_SYS.Set_Table_Column(columns_, ''C_' ||
+                   column_rec.attribute_name || ''', ''' || CASE WHEN column_rec.data_type_db IN ('STRING', 'REFERENCE', 'ENUMERATION') THEN 'VARCHAR2' ELSE column_rec.data_type_db END || CASE WHEN column_rec.data_type_db IN ('STRING', 'VARCHAR2', 'REFERENCE', 'ENUMERATION') THEN '(' || column_rec.data_length || ')' ELSE '' END || ''', ''' || CASE WHEN column_rec.mandatory_db = 'TRUE' THEN 'N' ELSE 'Y' END || ''');' || CHR(10);
+          DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+        END IF;
+      END LOOP;
+    
+      -- Close table creation block for the current LU_NAME
+      code_ := '   Database_SYS.Create_Or_Replace_Table(table_name_, columns_, ''&IFSAPP_DATA'', NULL, TRUE);' ||
+               CHR(10) || 'END;' || CHR(10) || '/ ' || CHR(10) || CHR(10);
+      DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+    END LOOP;
+  
+    -- End script
+    code_ := 'SET SERVEROUTPUT OFF' || CHR(10);
+    DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+  
+    -- Return the generated CLOB
+    RETURN clob_;
+  
+    -- Free the temporary CLOB
+    DBMS_LOB.FREETEMPORARY(clob_);
+  END generate_cf_cdb;
+  ----------------------------------------------------------------------Data Migration-----------------------------
+  FUNCTION generate_cf_migration_scripts(lu_name_ IN VARCHAR2) RETURN CLOB IS
+    clob_           CLOB;
+    base_table_     VARCHAR2(100);
+    cft_table_      VARCHAR2(100);
+    ATTRIBUTE_NAME_ VARCHAR2(100);
+    column_name_    VARCHAR2(100);
+    data_type_db_   VARCHAR2(100);
+    code_           CLOB;
+    lu_type_        VARCHAR2(100);
+    lu_reference_   VARCHAR2(100);
+    metadata_       VARCHAR2(100);
+    lov_view_       VARCHAR2(100);
+  
+    -- Cursor to retrieve LU-specific attributes and related metadata
+    CURSOR lu_cursor IS
+      SELECT DISTINCT s.BASE_TABLE AS BASE_TABLE,
+                      c.TABLE_NAME AS CFT_TABLE,
+                      t.ATTRIBUTE_NAME,
+                      t.column_name,
+                      t.data_type_db,
+                      t.lu_reference,
+                      t.METADATA,
+                      t.LOV_VIEW
+        FROM CUSTOM_FIELDS_TAB        c,
+             CUSTOM_FIELD_ATTRIBUTES  t,
+             CUSTOM_FIELDS_DICTIONARY s
+       WHERE t.LU = lu_name_ AND c.LU = t.LU AND s.LU_NAME = c.LU AND
+             t.custom_field_type_db != 'READ_ONLY_FIELD' AND
+             t.LU_TYPE = 'CUSTOM_FIELD';
+  
+    -- Cursor to retrieve enumeration values for attributes with ENUMERATION type
+    CURSOR enum_cursor IS
+      SELECT t.column_name, e.DB_VALUE, e.CLIENT_VALUE
+        FROM CUSTOM_FIELD_ENUM_VALUES e, CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.LU_REFERENCE = e.LU AND t.data_type_db = 'ENUMERATION' AND
+             t.LU = lu_name_;
+  
+    -- Cursor to validate if the given LU is a valid Custom Field LU 
+    CURSOR validate_cursor IS
+      SELECT DISTINCT lu_type
+        FROM CUSTOM_FIELD_ATTRIBUTES
+       WHERE lu = lu_name_;
+  
+  BEGIN
+    -- Validate the LU type
+    OPEN validate_cursor;
+    FETCH validate_cursor
+      INTO lu_type_;
+    IF validate_cursor%NOTFOUND THEN
+      ERROR_SYS.Record_General('NOTFOUND',
+                               'No LU or attributes found for ' || lu_name_ || '.');
+    ELSIF lu_type_ != 'CUSTOM_FIELD' THEN
+      ERROR_SYS.Record_General('INCORRECTLUTYPE',
+                               'LU type must be a CF. ' || lu_name_ ||
+                               ' is a CLU.');
+    END IF;
+    CLOSE validate_cursor;
+  
+    -- Initialize a temporary CLOB to store the generated script
+    DBMS_LOB.createtemporary(clob_, TRUE);
+  
+    -- Generate the script header
+    code_ := '-----------------------------------------------------------------------------' ||
+             CHR(10) || '-- Migration Script for ' || lu_name_ || CHR(10) ||
+             '-- Date: ' || TO_CHAR(SYSDATE, 'YYYY-MM-DD') || CHR(10) ||
+             '-----------------------------------------------------------------------------' ||
+             CHR(10) || CHR(10);
+    DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+  
+    OPEN lu_cursor;
+    FETCH lu_cursor
+      INTO base_table_, cft_table_, ATTRIBUTE_NAME_, column_name_, data_type_db_, lu_reference_, metadata_, lov_view_;
+    CLOSE lu_cursor;
+  
+    -- Start building the SQL script
+    code_ := 'DECLARE' || CHR(10) || '   CURSOR get_data IS' || CHR(10) ||
+             '      SELECT rowkey,' || CHR(10);
+  
+    FOR column_rec IN lu_cursor LOOP
+      code_ := code_ || '       ' || column_rec.column_name || ',' ||
+               CHR(10);
+    END LOOP;
+  
+    code_ := RTRIM(code_, ',' || CHR(10)) || CHR(10) ||
+             '      FROM ifsapp.' || cft_table_ || ';' || CHR(10) ||
+             CHR(10);
+    code_ := code_ || '   PRAGMA AUTONOMOUS_TRANSACTION;' || CHR(10) ||
+             CHR(10);
+    code_ := code_ || 'BEGIN' || CHR(10) || '   FOR rec_ IN get_data LOOP' ||
+             CHR(10) || '      UPDATE ifsapp.' || base_table_ || CHR(10) ||
+             '      SET ' || CHR(10);
+  
+    -- Dynamically map columns to values, handling ENUMERATION and REFERENCE fields
+    FOR column_rec IN lu_cursor LOOP
+      IF column_rec.data_type_db = 'REFERENCE' THEN
+        -- Handle REFERENCE fields with subqueries
+        -- use objkey for migrate from views
+        code_ := code_ || '          C_' || column_rec.ATTRIBUTE_NAME ||
+                 ' = (SELECT ' || column_rec.metadata || CHR(10) ||
+                 '             FROM ifsapp.' || column_rec.lov_view ||
+                 CHR(10) || '             WHERE OBJKEY = rec_.' ||
+                 column_rec.column_name || '),' || CHR(10);
+      ELSIF column_rec.data_type_db = 'ENUMERATION' THEN
+        IF column_rec.lu_reference = 'FndYesNo' THEN
+          -- Handle FndYesNo specifically
+          code_ := code_ || '          C_' || column_rec.ATTRIBUTE_NAME ||
+                   ' = DECODE(rec_.' || column_rec.column_name ||
+                   ', ''YES'', ''TRUE'', ''NO'', ''FALSE''),' || CHR(10) ||
+                   CHR(10);
+        
+        ELSIF column_rec.lu_reference IN ('FndBoolean', 'TRUE') THEN
+          -- Handle FndBoolean specifically
+          code_ := code_ || '          C_' || column_rec.ATTRIBUTE_NAME ||
+                   ' = DECODE(rec_.' || column_rec.column_name ||
+                   ', ''TRUE'', ''TRUE'', ''FALSE'', ''FALSE''),' ||
+                   CHR(10) || CHR(10);
+        ELSE
+          -- Handle general ENUMERATION
+          code_ := code_ || '          C_' || column_rec.ATTRIBUTE_NAME ||
+                   ' = DECODE(rec_.' || column_rec.column_name || ', ';
+          FOR enum_rec IN enum_cursor LOOP
+            IF enum_rec.column_name = column_rec.column_name THEN
+              code_ := code_ || '''' || enum_rec.DB_VALUE || ''', ''' ||
+                       enum_rec.CLIENT_VALUE || ''', ';
+            END IF;
+          END LOOP;
+          code_ := RTRIM(code_, ', ') || '), ' || CHR(10);
+        END IF;
+      ELSE
+        -- For non-ENUMERATION and non-REFERENCE columns, perform simple mapping
+        code_ := code_ || '          C_' || column_rec.ATTRIBUTE_NAME ||
+                 ' = rec_.' || column_rec.column_name || ',' || CHR(10) ||
+                 CHR(10);
+      END IF;
+    END LOOP;
+  
+    code_ := RTRIM(code_, ',' || CHR(10)) || CHR(10) ||
+             '      WHERE rowkey = rec_.rowkey;' || CHR(10) ||
+             '   END LOOP;' || CHR(10) || '   COMMIT;' || CHR(10) || 'END;' ||
+             CHR(10) || '/ ' || CHR(10) || CHR(10);
+  
+    -- Append the final script to the CLOB
+    DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+  
+    -- Return the generated migration script
+    RETURN clob_;
+  
+    -- Free the temporary CLOB to release resources
+    DBMS_LOB.FREETEMPORARY(clob_);
+  END generate_cf_migration_scripts;
+
+  FUNCTION generate_clu_migration_scripts(module_name_ IN VARCHAR2)
+    RETURN CLOB IS
+    clob_    CLOB;
+    has_key_ BOOLEAN := FALSE;
+    code_    CLOB;
+    lu_type_ VARCHAR2(20);
+    -- Cursor to fetch metadata for the CLU
+    CURSOR clu_cursor IS
+      SELECT DISTINCT s.BASE_TABLE AS BASE_TABLE,
+                      s.MODULE,
+                      s.LU_NAME,
+                      u.TABLE_NAME AS CLT_TABLE
+        FROM Custom_Lus_Dictionary s, CUSTOM_LUS u
+       WHERE s.LU_NAME = u.LU AND
+             s.MODULE = u.module AND s.MODULE = module_name_;
+  
+    -- Cursor to fetch column mappings for the CLU
+    CURSOR column_cursor(clu_name_ IN VARCHAR2) IS
+      SELECT t.ATTRIBUTE_NAME,
+             t.COLUMN_NAME,
+             t.custom_field_type_db,
+             t.alternate_key_db,
+             t.data_type_db,
+             t.metadata,
+             t.lov_view,
+             t.lu_reference
+        FROM CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.lu = clu_name_;
+  
+    CURSOR enum_cursor(lu_ref_ IN VARCHAR2) IS
+      SELECT t.column_name, e.DB_VALUE, e.CLIENT_VALUE
+        FROM CUSTOM_FIELD_ENUM_VALUES e, CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.LU_REFERENCE = e.LU AND t.data_type_db = 'ENUMERATION' AND
+             t.LU_REFERENCE = lu_ref_;
+  
+    CURSOR validate_cursor IS
+      SELECT DISTINCT MODULE
+        FROM dictionary_sys_lu
+       WHERE MODULE = module_name_;
+  BEGIN
+    OPEN validate_cursor;
+    FETCH validate_cursor
+      INTO lu_type_;
+  
+    -- Validate LU type
+    IF validate_cursor%NOTFOUND THEN
+    
+      ERROR_SYS.Record_General('NOTFOUND',
+                               'No Module found for ' || module_name_ || '.');
+    END IF;
+    CLOSE validate_cursor;
+    -- Initialize the CLOB to store the migration script
+    DBMS_LOB.createtemporary(clob_, TRUE);
+  
+    -- Add a script header
+    code_ := '-----------------------------------------------------------------------------' ||
+             CHR(10) || '-- Migration Script for CLU: ' || 'CMOD' ||
+             CHR(10) || '-- Date: ' || TO_CHAR(SYSDATE, 'YYYY-MM-DD') ||
+             CHR(10) ||
+             '-----------------------------------------------------------------------------' ||
+             CHR(10) || CHR(10);
+    DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+  
+    -- Loop through all LUs in the module
+    FOR lu_rec IN clu_cursor LOOP
+      code_ := CHR(10) || 'PROMPT ADDING DATA TO ' || lu_rec.BASE_TABLE ||
+               '...' ||
+              
+               CHR(10);
+      DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+      -- Check if a key exists
+      has_key_ := FALSE; -- Reset for each LU
+      FOR column_rec IN column_cursor(lu_rec.LU_NAME) LOOP
+        IF column_rec.alternate_key_db = 'TRUE' THEN
+          has_key_ := TRUE;
+          EXIT;
+        END IF;
+      END LOOP;
+    
+      -- Start the PL/SQL block for the script
+      code_ := 'DECLARE' || CHR(10) || 'BEGIN' || CHR(10) ||
+               '  FOR rec IN (' || CHR(10) || '    SELECT ' || CHR(10);
+    
+      -- Dynamically fetch column mappings and build the SELECT list
+      FOR column_rec IN column_cursor(lu_rec.LU_NAME) LOOP
+        IF column_rec.custom_field_type_db != 'READ_ONLY_FIELD' THEN
+          code_ := code_ || '          ' || column_rec.COLUMN_NAME || ', ' ||
+                   CHR(10);
+        END IF;
+      END LOOP;
+    
+      -- Add ROWVERSION
+      code_ := code_ || '          ROWVERSION ' || CHR(10) || '    FROM ' ||
+               ' ifsapp.' || lu_rec.CLT_TABLE || ' r)' || CHR(10) ||
+               '  LOOP' || CHR(10) || '    BEGIN' || CHR(10) ||
+               '      INSERT INTO C_' ||
+               REPLACE(lu_rec.BASE_TABLE, 'CLT', 'TAB') || ' (' || CHR(10);
+    
+      -- Build the INSERT column list
+      IF NOT has_key_ THEN
+        code_ := code_ || '          RECORD_ID,' || CHR(10);
+      END IF;
+    
+      FOR column_rec IN column_cursor(lu_rec.LU_NAME) LOOP
+        IF column_rec.custom_field_type_db != 'READ_ONLY_FIELD' THEN
+          code_ := code_ || '          ' || column_rec.ATTRIBUTE_NAME || ',' ||
+                   CHR(10);
+        END IF;
+      END LOOP;
+    
+      -- Add ROWVERSION and ROWKEY
+      code_ := code_ || '          ROWVERSION,' || CHR(10) ||
+               '          ROWKEY' || CHR(10) || '      )' || CHR(10) ||
+               '      VALUES (' || CHR(10);
+    
+      IF NOT has_key_ THEN
+        code_ := code_ || '        C_' ||
+                 REPLACE(lu_rec.BASE_TABLE, 'CLT', 'SEQ') || '.NEXTVAL,' ||
+                 CHR(10);
+      END IF;
+    
+      -- Build the VALUES list
+      FOR column_rec IN column_cursor(lu_rec.LU_NAME) LOOP
+        IF column_rec.custom_field_type_db != 'READ_ONLY_FIELD' THEN
+          IF column_rec.data_type_db NOT IN ('REFERENCE', 'ENUMERATION') THEN
+            code_ := code_ || '        rec.' || column_rec.COLUMN_NAME || ',' ||
+                     CHR(10);
+          END IF;
+        
+          -- Handle REFERENCE fields with subqueries
+          -- use objkey for migrate from views
+          IF column_rec.data_type_db = 'REFERENCE' THEN
+            code_ := code_ || '        (SELECT ' || column_rec.metadata ||
+                     CHR(10) || '             FROM ifsapp.' ||
+                     column_rec.lov_view || CHR(10) ||
+                     '             WHERE OBJKEY = rec.' ||
+                     column_rec.column_name || '),' || CHR(10);
+          END IF;
+        
+          IF column_rec.data_type_db = 'ENUMERATION' THEN
+            IF column_rec.lu_reference = 'FndYesNo' THEN
+              code_ := code_ || '        DECODE(rec.' ||
+                       column_rec.column_name ||
+                       ', ''YES'', ''TRUE'', ''NO'', ''FALSE''),' ||
+                       CHR(10);
+            ELSIF column_rec.lu_reference IN ('FndBoolean', 'TRUE') THEN
+              code_ := code_ || '        DECODE(rec.' ||
+                       column_rec.column_name ||
+                       ', ''TRUE'', ''TRUE'', ''FALSE'', ''FALSE''),' ||
+                       CHR(10);
+            ELSIF column_rec.lu_reference = 'GenYesNo' THEN
+              code_ := code_ || '        DECODE(rec.' ||
+                       column_rec.column_name ||
+                       ', ''Y'', ''TRUE'', ''N'', ''FALSE''),' || CHR(10);
+            ELSE
+              code_ := code_ || '        DECODE(rec.' ||
+                       column_rec.column_name;
+              FOR enum_rec IN enum_cursor(column_rec.lu_reference) LOOP
+                code_ := code_ || ', ''' || enum_rec.DB_VALUE || ''', ''' ||
+                         enum_rec.CLIENT_VALUE || '''';
+              END LOOP;
+              code_ := code_ || '),' || CHR(10);
+            END IF;
+          END IF;
+        END IF;
+      END LOOP;
+    
+      -- Add ROWVERSION and SYS_GUID for ROWKEY
+      code_ := code_ || '        rec.ROWVERSION, ' || CHR(10) ||
+               '        SYS_GUID()' || CHR(10) || '      );' || CHR(10) ||
+               '    EXCEPTION' || CHR(10) ||
+               '      WHEN DUP_VAL_ON_INDEX THEN' || CHR(10) ||
+               '        NULL; ' || CHR(10) || -- Handle duplicate entry
+               '    END;' || CHR(10) || '  END LOOP;' || CHR(10) || 'END;' ||
+               CHR(10) || '/ ' || CHR(10) || CHR(10);
+    
+      -- Append the generated script to the CLOB
+      DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+    END LOOP;
+  
+    -- Return the generated migration script
+    RETURN clob_;
+  
+    -- Free the temporary CLOB
+    DBMS_LOB.FREETEMPORARY(clob_);
+  END generate_clu_migration_scripts;
+
 END CHANGE8_CODE_GEN_API;
 /
