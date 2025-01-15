@@ -1,0 +1,16 @@
+CREATE OR REPLACE PACKAGE CHANGE8_CODE_GEN_API AS
+
+  FUNCTION generate_clu_entity_code(clu_name_ IN VARCHAR2) RETURN CLOB;
+  FUNCTION to_pascal_case(column_name_ IN VARCHAR2) RETURN VARCHAR2;
+  FUNCTION generate_clu_projection_code(clu_name_ IN VARCHAR2) RETURN CLOB;
+  FUNCTION generate_clu_client_code(clu_name_ IN VARCHAR2) RETURN CLOB;
+  FUNCTION generate_enum_code(lu_reference_ IN VARCHAR2) RETURN CLOB;
+  
+  FUNCTION generate_cf_entity_code(lu_name_ IN VARCHAR2) RETURN CLOB;
+  FUNCTION generate_cf_projection_code(lu_name_ IN VARCHAR2) RETURN CLOB;
+  
+  FUNCTION generate_clu_cdb(clu_name_ IN VARCHAR2) RETURN CLOB;
+  FUNCTION generate_cf_cdb(lu_name_ IN VARCHAR2) RETURN CLOB;
+  
+END CHANGE8_CODE_GEN_API;
+/
