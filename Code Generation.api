@@ -12,7 +12,7 @@ CREATE OR REPLACE PACKAGE CHANGE8_CODE_GEN_API AS
   FUNCTION generate_clu_cdb(module_name_ IN VARCHAR2) RETURN CLOB;
   FUNCTION generate_cf_cdb(module_name_ IN VARCHAR2) RETURN CLOB;
 
-  FUNCTION generate_cf_migration_scripts(lu_name_ IN VARCHAR2) RETURN CLOB;
+  FUNCTION generate_cf_migration_scripts(module_name_ IN VARCHAR2) RETURN CLOB;
   FUNCTION generate_clu_migration_scripts(module_name_ IN VARCHAR2)
     RETURN CLOB;
 END CHANGE8_CODE_GEN_API;
@@ -1380,153 +1380,125 @@ Expression    : ' || rec.metadata || '
     DBMS_LOB.FREETEMPORARY(clob_);
   END generate_cf_cdb;
   ----------------------------------------------------------------------Data Migration-----------------------------
-  FUNCTION generate_cf_migration_scripts(lu_name_ IN VARCHAR2) RETURN CLOB IS
-    clob_           CLOB;
-    base_table_     VARCHAR2(100);
-    cft_table_      VARCHAR2(100);
-    ATTRIBUTE_NAME_ VARCHAR2(100);
-    column_name_    VARCHAR2(100);
-    data_type_db_   VARCHAR2(100);
-    code_           CLOB;
-    lu_type_        VARCHAR2(100);
-    lu_reference_   VARCHAR2(100);
-    metadata_       VARCHAR2(100);
-    lov_view_       VARCHAR2(100);
-  
-    -- Cursor to retrieve LU-specific attributes and related metadata
+  FUNCTION generate_cf_migration_scripts(module_name_ IN VARCHAR2) RETURN CLOB IS
+  clob_    CLOB;
+    code_    CLOB;
+    lu_name_ VARCHAR2(100);
+    -- Cursor to fetch metadata for the CLU
     CURSOR lu_cursor IS
-      SELECT DISTINCT s.BASE_TABLE AS BASE_TABLE,
-                      c.TABLE_NAME AS CFT_TABLE,
-                      t.ATTRIBUTE_NAME,
-                      t.column_name,
-                      t.data_type_db,
-                      t.lu_reference,
-                      t.METADATA,
-                      t.LOV_VIEW
-        FROM CUSTOM_FIELDS_TAB        c,
-             CUSTOM_FIELD_ATTRIBUTES  t,
-             CUSTOM_FIELDS_DICTIONARY s
-       WHERE t.LU = lu_name_ AND c.LU = t.LU AND s.LU_NAME = c.LU AND
-             t.custom_field_type_db != 'READ_ONLY_FIELD' AND
-             t.LU_TYPE = 'CUSTOM_FIELD';
-  
+    SELECT DISTINCT s.BASE_TABLE AS BASE_TABLE,
+                  s.MODULE,
+                  s.LU_NAME,
+                  u.TABLE_NAME AS CFT_TABLE
+    FROM CUSTOM_FIELDS_DICTIONARY s,CUSTOM_FIELD_ATTRIBUTES  t,
+         CUSTOM_FIELDS u
+   WHERE s.LU_NAME = u.LU AND  u.LU = t.LU AND
+         s.MODULE = u.module and   s.MODULE = module_name_;
+    -- Cursor to fetch column mappings for the CLU
+    CURSOR column_cursor(lu_name_ IN VARCHAR2) IS
+      SELECT DISTINCT t.ATTRIBUTE_NAME,
+             t.COLUMN_NAME,
+             t.custom_field_type_db,
+             t.alternate_key_db,
+             t.data_type_db,
+             t.metadata,
+             t.lov_view,
+             t.lu_reference
+        FROM CUSTOM_FIELD_ATTRIBUTES t
+       WHERE t.lu_type = 'CUSTOM_FIELD' AND t.custom_field_type_db != 'READ_ONLY_FIELD'  AND t.lu = lu_name_;
     -- Cursor to retrieve enumeration values for attributes with ENUMERATION type
-    CURSOR enum_cursor IS
+    CURSOR enum_cursor(lu_ref_ IN VARCHAR2) IS
       SELECT t.column_name, e.DB_VALUE, e.CLIENT_VALUE
         FROM CUSTOM_FIELD_ENUM_VALUES e, CUSTOM_FIELD_ATTRIBUTES t
        WHERE t.LU_REFERENCE = e.LU AND t.data_type_db = 'ENUMERATION' AND
-             t.LU = lu_name_;
-  
-    -- Cursor to validate if the given LU is a valid Custom Field LU 
-    CURSOR validate_cursor IS
-      SELECT DISTINCT lu_type
-        FROM CUSTOM_FIELD_ATTRIBUTES
-       WHERE lu = lu_name_;
-  
+             t.LU_REFERENCE = lu_ref_;
   BEGIN
-    -- Validate the LU type
-    OPEN validate_cursor;
-    FETCH validate_cursor
-      INTO lu_type_;
-    IF validate_cursor%NOTFOUND THEN
-      ERROR_SYS.Record_General('NOTFOUND',
-                               'No LU or attributes found for ' || lu_name_ || '.');
-    ELSIF lu_type_ != 'CUSTOM_FIELD' THEN
-      ERROR_SYS.Record_General('INCORRECTLUTYPE',
-                               'LU type must be a CF. ' || lu_name_ ||
-                               ' is a CLU.');
-    END IF;
-    CLOSE validate_cursor;
-  
     -- Initialize a temporary CLOB to store the generated script
     DBMS_LOB.createtemporary(clob_, TRUE);
-  
     -- Generate the script header
     code_ := '-----------------------------------------------------------------------------' ||
-             CHR(10) || '-- Migration Script for ' || lu_name_ || CHR(10) ||
-             '-- Date: ' || TO_CHAR(SYSDATE, 'YYYY-MM-DD') || CHR(10) ||
+             CHR(10) || '-- Migration Script for Module - ' || module_name_ ||
+             CHR(10) || '-- Date: ' || TO_CHAR(SYSDATE, 'YYYY-MM-DD') ||
+             CHR(10) ||
              '-----------------------------------------------------------------------------' ||
              CHR(10) || CHR(10);
-    DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
-  
-    OPEN lu_cursor;
-    FETCH lu_cursor
-      INTO base_table_, cft_table_, ATTRIBUTE_NAME_, column_name_, data_type_db_, lu_reference_, metadata_, lov_view_;
-    CLOSE lu_cursor;
-  
-    -- Start building the SQL script
-    code_ := 'DECLARE' || CHR(10) || '   CURSOR get_data IS' || CHR(10) ||
-             '      SELECT rowkey,' || CHR(10);
-  
-    FOR column_rec IN lu_cursor LOOP
-      code_ := code_ || '       ' || column_rec.column_name || ',' ||
+    -- Start generating scripts for each LU
+    FOR lu_rec IN lu_cursor LOOP
+      -- Start a section for each LU
+      code_ := code_ ||
+               '-----------------------------------------------------------------------------' ||
+               CHR(10) || '-- Migration Script for LU - ' || lu_rec.LU_NAME ||
+               CHR(10) ||
+               '-----------------------------------------------------------------------------' ||
                CHR(10);
-    END LOOP;
-  
-    code_ := RTRIM(code_, ',' || CHR(10)) || CHR(10) ||
-             '      FROM ifsapp.' || cft_table_ || ';' || CHR(10) ||
-             CHR(10);
-    code_ := code_ || '   PRAGMA AUTONOMOUS_TRANSACTION;' || CHR(10) ||
-             CHR(10);
-    code_ := code_ || 'BEGIN' || CHR(10) || '   FOR rec_ IN get_data LOOP' ||
-             CHR(10) || '      UPDATE ifsapp.' || base_table_ || CHR(10) ||
-             '      SET ' || CHR(10);
-  
-    -- Dynamically map columns to values, handling ENUMERATION and REFERENCE fields
-    FOR column_rec IN lu_cursor LOOP
-      IF column_rec.data_type_db = 'REFERENCE' THEN
-        -- Handle REFERENCE fields with subqueries
-        -- use objkey for migrate from views
-        code_ := code_ || '          C_' || column_rec.ATTRIBUTE_NAME ||
-                 ' = (SELECT ' || column_rec.metadata || CHR(10) ||
-                 '             FROM ifsapp.' || column_rec.lov_view ||
-                 CHR(10) || '             WHERE OBJKEY = rec_.' ||
-                 column_rec.column_name || '),' || CHR(10);
-      ELSIF column_rec.data_type_db = 'ENUMERATION' THEN
-        IF column_rec.lu_reference = 'FndYesNo' THEN
-          -- Handle FndYesNo specifically
-          code_ := code_ || '          C_' || column_rec.ATTRIBUTE_NAME ||
-                   ' = DECODE(rec_.' || column_rec.column_name ||
-                   ', ''YES'', ''TRUE'', ''NO'', ''FALSE''),' || CHR(10) ||
+      DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
+      -- Declare the cursor for data selection
+      code_ := 'DECLARE' || CHR(10) || '   CURSOR get_data IS' || CHR(10) ||
+               '      SELECT rowkey,' || CHR(10);
+      -- Fetch columns for the LU
+      FOR column_rec IN column_cursor(lu_rec.LU_NAME) LOOP
+        IF column_rec.custom_field_type_db != 'READ_ONLY_FIELD' THEN
+          code_ := code_ || '          ' || column_rec.COLUMN_NAME || ',' ||
                    CHR(10);
-        
-        ELSIF column_rec.lu_reference IN ('FndBoolean', 'TRUE') THEN
-          -- Handle FndBoolean specifically
-          code_ := code_ || '          C_' || column_rec.ATTRIBUTE_NAME ||
-                   ' = DECODE(rec_.' || column_rec.column_name ||
-                   ', ''TRUE'', ''TRUE'', ''FALSE'', ''FALSE''),' ||
-                   CHR(10) || CHR(10);
-        ELSE
-          -- Handle general ENUMERATION
-          code_ := code_ || '          C_' || column_rec.ATTRIBUTE_NAME ||
-                   ' = DECODE(rec_.' || column_rec.column_name || ', ';
-          FOR enum_rec IN enum_cursor LOOP
-            IF enum_rec.column_name = column_rec.column_name THEN
-              code_ := code_ || '''' || enum_rec.DB_VALUE || ''', ''' ||
-                       enum_rec.CLIENT_VALUE || ''', ';
-            END IF;
-          END LOOP;
-          code_ := RTRIM(code_, ', ') || '), ' || CHR(10);
         END IF;
-      ELSE
-        -- For non-ENUMERATION and non-REFERENCE columns, perform simple mapping
-        code_ := code_ || '          C_' || column_rec.ATTRIBUTE_NAME ||
-                 ' = rec_.' || column_rec.column_name || ',' || CHR(10) ||
-                 CHR(10);
-      END IF;
+      END LOOP;
+      -- Remove trailing comma
+      code_ := RTRIM(code_, ',' || CHR(10)) || CHR(10);
+      -- Add the table name
+      code_ := code_ || '      FROM ifsapp.' || lu_rec.CFT_TABLE || ';' ||
+               CHR(10) || '   PRAGMA AUTONOMOUS_TRANSACTION;' || CHR(10) ||
+               CHR(10) || 'BEGIN' || CHR(10);
+      -- Loop through columns for UPDATE statement
+      FOR column_rec IN column_cursor(lu_rec.LU_NAME) LOOP
+        IF column_rec.data_type_db = 'REFERENCE' THEN
+          -- Handle REFERENCE fields with subqueries
+          -- use objkey for migrate from views
+          code_ := code_ || '          C_' || column_rec.ATTRIBUTE_NAME ||
+                   ' = (SELECT ' || column_rec.metadata || CHR(10) ||
+                   '             FROM ifsapp.' || column_rec.lov_view ||
+                   CHR(10) || '             WHERE OBJKEY = rec_.' ||
+                   column_rec.column_name || '),' || CHR(10);
+        ELSIF column_rec.data_type_db = 'ENUMERATION' THEN
+          IF column_rec.lu_reference = 'FndYesNo' THEN
+            -- Handle FndYesNo specifically
+            code_ := code_ || '          C_' || column_rec.ATTRIBUTE_NAME ||
+                     ' = DECODE(rec_.' || column_rec.column_name ||
+                     ', ''YES'', ''TRUE'', ''NO'', ''FALSE''),' || CHR(10) ||
+                     CHR(10);
+          ELSIF column_rec.lu_reference IN ('FndBoolean', 'TRUE') THEN
+            -- Handle FndBoolean specifically
+            code_ := code_ || '          C_' || column_rec.ATTRIBUTE_NAME ||
+                     ' = DECODE(rec_.' || column_rec.column_name ||
+                     ', ''TRUE'', ''TRUE'', ''FALSE'', ''FALSE''),' ||
+                     CHR(10) || CHR(10);
+          ELSE
+            -- Handle general ENUMERATION
+            code_ := code_ || '          C_' || column_rec.ATTRIBUTE_NAME ||
+                     ' = DECODE(rec_.' || column_rec.column_name || ', ';
+            FOR enum_rec IN enum_cursor(column_rec.lu_reference) LOOP
+              IF enum_rec.column_name = column_rec.column_name THEN
+                code_ := code_ || '''' || enum_rec.DB_VALUE || ''', ''' ||
+                         enum_rec.CLIENT_VALUE || ''', ';
+              END IF;
+            END LOOP;
+            code_ := RTRIM(code_, ', ') || '), ' || CHR(10);
+          END IF;
+        ELSE
+          -- For non-ENUMERATION and non-REFERENCE columns, perform simple mapping
+          code_ := code_ || '          C_' || column_rec.ATTRIBUTE_NAME ||
+                   ' = rec_.' || column_rec.column_name || ',' || CHR(10) ||
+                   CHR(10);
+        END IF;
+      END LOOP;
+      -- Finalize the update block for the LU
+      code_ := RTRIM(code_, ',' || CHR(10)) || CHR(10) ||
+               '      WHERE rowkey = rec_.rowkey;' || CHR(10) ||
+               '   END LOOP;' || CHR(10) || '   COMMIT;' || CHR(10) ||
+               'END;' || CHR(10) || '/ ' || CHR(10) || CHR(10);
     END LOOP;
-  
-    code_ := RTRIM(code_, ',' || CHR(10)) || CHR(10) ||
-             '      WHERE rowkey = rec_.rowkey;' || CHR(10) ||
-             '   END LOOP;' || CHR(10) || '   COMMIT;' || CHR(10) || 'END;' ||
-             CHR(10) || '/ ' || CHR(10) || CHR(10);
-  
-    -- Append the final script to the CLOB
     DBMS_LOB.writeappend(clob_, LENGTH(code_), code_);
-  
     -- Return the generated migration script
     RETURN clob_;
-  
     -- Free the temporary CLOB to release resources
     DBMS_LOB.FREETEMPORARY(clob_);
   END generate_cf_migration_scripts;
